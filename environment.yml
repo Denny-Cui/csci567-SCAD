@@ -1,0 +1,12 @@
+name: scad
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.5.1
+      - torchvision==0.20.1
+      - d2l==1.0.3
+      - tqdm
