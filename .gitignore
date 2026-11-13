@@ -4,3 +4,4 @@ save_model/
 *.pth
 .ipynb_checkpoints/
 .DS_Store
+CLAUDE.md

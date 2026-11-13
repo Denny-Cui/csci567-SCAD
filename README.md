@@ -1,6 +1,6 @@
 # SCAD: A Lightweight Recommendation Model based on Multi-interest
 
-[Xiaotong Cui](cxt20030114@gmail.com), [Nan Wang](wangnan@hlju.edu.cn)*
+[Xiaotong Cui](cuixiaot@usc.edu), [Zherui Li](zheruil@usc.edu), [Xiang Lin](xlin3364@usc.edu), [Shao-Yuan Huang](shuang93@usc.edu)
 
 ## Prerequisites
 
@@ -14,7 +14,7 @@
 
 - Install pytorch 2.x
 - Install the d2l package based on the instructions here: https://d2l.ai/chapter_installation/index.html
-- Clone this repository `git clone https://github.com/Denny-Cui/SCAD.git`
+- Clone this repository `git clone https://github.com/Denny-Cui/csci567-SCAD.git`
 
 ### Dataset
 
