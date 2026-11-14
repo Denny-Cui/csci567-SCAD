@@ -5,3 +5,7 @@ save_model/
 .ipynb_checkpoints/
 .DS_Store
 CLAUDE.md
+# training outputs
+note.csv
+note.txt
+process.txt

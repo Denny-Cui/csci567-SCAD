@@ -59,31 +59,37 @@ class SCAD(nn.Module):
         return scale * x / (squared_norm.sqrt() + 1e-8)
 
     def single_dynamic_routing(self, neigh):
-        b = torch.zeros(self.seq_len).to(device)  # [6]
-        neigh = neigh.to(device)  # [6, 128]
+        # batched: neigh [B, 6, 128]; the middle dim of size 1 is the original 1-D [6] logit vector
+        batch_size = neigh.shape[0]
+        b = torch.zeros(batch_size, 1, self.seq_len).to(device)  # [B, 1, 6]
+        neigh = neigh.to(device)  # [B, 6, 128]
         for i in range(3):
-            att_w = self.tar_att1(b, neigh)  # [6]
-            c = torch.softmax(b, dim=-1) * self.add_norm2(b, att_w)  # [6]
-            c = torch.softmax(c, dim=-1)  # [6]
-            s = c @ neigh  # [1,6] @ [6, 128] = [128]
-            a = self.squashing(s)  # [128]
-            b = b + a @ neigh.transpose(-1, -2)  # [6]
-        return a  # [128]
+            att_w = self.tar_att1(b, neigh)  # [B, 1, 6]
+            c = torch.softmax(b, dim=-1) * self.add_norm2(b, att_w)  # [B, 1, 6]
+            c = torch.softmax(c, dim=-1)  # [B, 1, 6]
+            s = c @ neigh  # [B, 1, 6] @ [B, 6, 128] = [B, 1, 128]
+            a = self.squashing(s)  # [B, 1, 128]
+            b = b + a @ neigh.transpose(-1, -2)  # [B, 1, 6]
+        return a.squeeze(1)  # [B, 128]
 
     def multi_dynamic_routing(self, neigh):
-        b = torch.randn(self.k, self.seq_len).to(device)  # [4, 6]
-        neigh = neigh.to(device)  # [6, 128]
+        # batched: neigh [B, 6, 128]
+        # randn is still drawn per sample on the CPU, so the CPU RNG stream matches the per-sample original
+        batch_size = neigh.shape[0]
+        b = torch.stack([torch.randn(self.k, self.seq_len) for _ in range(batch_size)]).to(device)  # [B, k, 6]
+        neigh = neigh.to(device)  # [B, 6, 128]
         for i in range(3):
-            att_w = self.tar_att1(b, neigh)  # [4, 6]
-            c = torch.softmax(b, dim=-1) * self.add_norm2(b, att_w)  # [4, 6]
-            c = torch.softmax(c, dim=-1)  # [4, 6]
-            s = c @ neigh  # [4, 128]
-            a = self.squashing(s)  # [4, 128]
+            att_w = self.tar_att1(b, neigh)  # [B, k, 6]
+            c = torch.softmax(b, dim=-1) * self.add_norm2(b, att_w)  # [B, k, 6]
+            c = torch.softmax(c, dim=-1)  # [B, k, 6]
+            s = c @ neigh  # [B, k, 128]
+            a = self.squashing(s)  # [B, k, 128]
             if i < 2:
-                b = b + a @ neigh.transpose(-1, -2)  # [4, 6]
-        return a  # [4, 128]
+                b = b + a @ neigh.transpose(-1, -2)  # [B, k, 6]
+        return a  # [B, k, 128]
 
     def usr_add_attention(self, outs):
+        # outs [N, T, 128] -> [N, 128]; stays on GPU (no .cpu() round trips), same accumulation order
         ret = 0
         usr_hn = outs[:, -1, :]
         usr_hn = usr_hn.to(device)
@@ -93,42 +99,38 @@ class SCAD(nn.Module):
             usr_hi = usr_hi.to(device)
             usr_hi = self.attention1(usr_hi)
             sig_hi_hn = self.sigmoid(usr_hn + usr_hi)
-            att = self.attention2(sig_hi_hn).cpu()
-            ret += att * outs[:, i, :].cpu()
+            att = self.attention2(sig_hi_hn)  # [N, 1]
+            ret = ret + att * outs[:, i, :]
         return ret
 
     def forward(self, train_data, train_neigh_data):
         train_data, train_neigh_data = train_data.to(device), train_neigh_data.to(device)
-        train_data = self.embedding(train_data)
-        train_neigh_data = self.embedding(train_neigh_data)
+        train_data = self.embedding(train_data)  # [B, T, 128]
+        train_neigh_data = self.embedding(train_neigh_data)  # [B, N, T, 128]
 
         batch_size = train_data.shape[0]
         usr_hidden = torch.zeros(self.layer_num, batch_size, self.hid_dim).contiguous().to(device)
-        outs, usr_hidden = self.gru(train_data, usr_hidden)
+        outs, usr_hidden = self.gru(train_data, usr_hidden)  # [B, T, 128]
 
-        outs = self.usr_add_attention(outs)
-        gru_out = torch.zeros(outs.shape[0], outs.shape[1]).to(device)
-        gru_out2 = torch.zeros(outs.shape[0], self.k, outs.shape[1]).to(device)
-        cnt = 0
+        outs = self.usr_add_attention(outs)  # [B, 128]
 
-        for usr, neigh in zip(outs, train_neigh_data):
-            hidden = torch.zeros(self.layer_num, neigh.shape[0], self.hid_dim).contiguous().to(device)
-            nei_out, hidden = self.gru(neigh, hidden)
-            usr = usr.to(device)
-            nei_out = torch.concat((nei_out, usr.repeat(self.seq_len - 1, 1, 1)), dim=1)
-            nei_out = self.usr_add_attention(nei_out)
-            nei = torch.zeros(nei_out.shape[0] + 1, nei_out.shape[1])
-            nei[0] = usr
+        # 1) one GRU call for all neighbour sequences
+        B, N, T, D = train_neigh_data.shape
+        H = outs.shape[1]
+        hidden = torch.zeros(self.layer_num, B * N, self.hid_dim).contiguous().to(device)
+        nei_out, hidden = self.gru(train_neigh_data.reshape(B * N, T, D), hidden)  # [B*N, T, 128]
 
-            for idx, i in enumerate(nei_out):
-                nei[idx + 1] = i
+        # 2)+3) append the user vector, pool in batch, then stack user + neighbours into [B, 6, 128]
+        usr_rep = outs[:, None, None, :].expand(B, self.seq_len - 1, 1, H).reshape(B * (self.seq_len - 1), 1, H)
+        nei_out = torch.concat((nei_out, usr_rep), dim=1)  # [B*N, T+1, 128]
+        nei_out = self.usr_add_attention(nei_out).reshape(B, N, H)  # [B, N, 128]
+        nei = torch.concat((outs[:, None, :], nei_out), dim=1)  # [B, 6, 128]
+        after = self.self_att1(nei)
+        nei = self.add_norm1(nei, after)  # [B, 6, 128]
 
-            nei = nei.to(device)
-            after = self.self_att1(nei)
-            nei = self.add_norm1(nei, after)  # [6, 128]
-            gru_out[cnt] = self.single_dynamic_routing(nei)
-            gru_out2[cnt] = self.multi_dynamic_routing(nei)
-            cnt += 1
+        # 4) single- and multi-interest capsule routing, each called once on the whole batch
+        gru_out = self.single_dynamic_routing(nei)  # [B, 128]
+        gru_out2 = self.multi_dynamic_routing(nei)  # [B, k, 128]
 
         item_embedding = [i for i in range(self.item_num)]
         item_embedding = torch.LongTensor(item_embedding).to(device)
