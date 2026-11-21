@@ -10,6 +10,7 @@ note.csv
 note.txt
 process.txt
 note_mean.csv
+process_mean.txt
 
 # local docs (not tracked)
 doc/
